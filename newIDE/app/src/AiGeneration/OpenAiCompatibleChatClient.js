@@ -82,12 +82,19 @@ export type ChatCompletionsTransportResponse = {|
   data: Object | string | null,
 |};
 
+// A transport performs the HTTP request. It resolves for EVERY HTTP status
+// (error handling for non-2xx statuses lives in sendChatCompletion) and must
+// serialize the body object as JSON — the default transport lets axios do it.
+// Network-level failures (DNS, connection reset, timeout) reject.
 export type ChatCompletionsTransport = (
   request: ChatCompletionsTransportRequest
 ) => Promise<ChatCompletionsTransportResponse>;
 
+// Joins a base URL and a path, tolerating trailing slashes on the base and a
+// missing leading slash on the path:
+// joinUrl('https://x/api/v1', 'models') === 'https://x/api/v1/models'.
 export const joinUrl = (baseUrl: string, path: string): string =>
-  baseUrl.replace(/\/+$/, '') + path;
+  baseUrl.replace(/\/+$/, '') + (path.startsWith('/') ? path : `/${path}`);
 
 // --- GDevelop AI request records -> Chat Completions messages ---
 
@@ -180,17 +187,27 @@ export const chatCompletionResponseToContentItems = (
 
 // --- Transport ---
 
-// Some OpenAI-compatible servers (IO Intelligence included) default to
-// `tool_choice: "none"`, so an explicit "auto" is required whenever the
-// editor sends tools, otherwise its function-calling flows never trigger.
+const MAX_ERROR_BODY_LENGTH = 500;
+
 export const extractErrorMessage = (data: ?Object | string): string => {
   if (!data) return '';
-  if (typeof data === 'string') return data;
+  if (typeof data === 'string') {
+    return data.length > MAX_ERROR_BODY_LENGTH
+      ? `${data.slice(0, MAX_ERROR_BODY_LENGTH)}…`
+      : data;
+  }
   if (typeof data.error === 'string') return data.error;
   if (data.error && typeof data.error.message === 'string') {
     return data.error.message;
   }
   if (typeof data.message === 'string') return data.message;
+  // FastAPI-style errors (io.net and vLLM stacks): {detail: "..."} or
+  // {detail: [{msg: "..."}]}.
+  if (typeof data.detail === 'string') return data.detail;
+  if (Array.isArray(data.detail)) {
+    const first = data.detail[0];
+    if (first && typeof first.msg === 'string') return first.msg;
+  }
   return '';
 };
 
@@ -205,6 +222,7 @@ export const axiosChatCompletionsTransport: ChatCompletionsTransport = async ({
   const response = await axios.post(url, body, {
     headers,
     validateStatus: () => true,
+    timeout: 120000,
   });
   return { status: response.status, data: response.data };
 };
@@ -224,16 +242,31 @@ export const sendChatCompletion = async ({
   usage: Object | null,
 |}> => {
   const sendRequest = transport || axiosChatCompletionsTransport;
+  const url = joinUrl(configuration.baseUrl, '/chat/completions');
   const body = {
     model: configuration.model,
     messages,
+    // Some OpenAI-compatible servers (IO Intelligence included) default to
+    // `tool_choice: "none"`, so an explicit "auto" is required whenever the
+    // editor sends tools, otherwise its function-calling flows never trigger.
     ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
   };
-  const response = await sendRequest({
-    url: joinUrl(configuration.baseUrl, '/chat/completions'),
-    headers: { Authorization: `Bearer ${configuration.apiKey}` },
-    body,
-  });
+  let response: ChatCompletionsTransportResponse;
+  try {
+    response = await sendRequest({
+      url,
+      headers: { Authorization: `Bearer ${configuration.apiKey}` },
+      body,
+    });
+  } catch (error) {
+    // Network-level failures (DNS, connection reset, timeout): surface the
+    // endpoint so the user knows which provider configuration failed.
+    throw new Error(
+      `Chat Completions request to ${url} failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
   if (response.status < 200 || response.status >= 300) {
     const detail = extractErrorMessage(response.data);
     const suffix = detail ? `: ${detail}` : '';

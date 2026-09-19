@@ -75,6 +75,12 @@ describe('OpenAiCompatibleChatClient', () => {
         'https://example.com/v1/chat/completions'
       );
     });
+
+    it('accepts a path without a leading slash', () => {
+      expect(joinUrl('https://api.example.com/v1', 'models')).toBe(
+        'https://api.example.com/v1/models'
+      );
+    });
   });
 
   describe('translateAiRequestMessagesToChatMessages', () => {
@@ -243,6 +249,21 @@ describe('OpenAiCompatibleChatClient', () => {
       expect(extractErrorMessage('plain text')).toBe('plain text');
       expect(extractErrorMessage(null)).toBe('');
     });
+
+    it('reads FastAPI-style detail errors', () => {
+      expect(extractErrorMessage({ detail: 'Not Found' })).toBe('Not Found');
+      expect(
+        extractErrorMessage({ detail: [{ msg: 'field required' }] })
+      ).toBe('field required');
+    });
+
+    it('truncates long non-JSON bodies', () => {
+      const longBody = '<html>'.repeat(200);
+      const message = extractErrorMessage(longBody);
+      expect(message.length).toBeLessThanOrEqual(501);
+      expect(message.startsWith('<html><html>')).toBe(true);
+      expect(message.endsWith('…')).toBe(true);
+    });
   });
 
   describe('sendChatCompletion', () => {
@@ -311,6 +332,74 @@ describe('OpenAiCompatibleChatClient', () => {
       ).rejects.toThrow(
         'Chat Completions request failed (401): Invalid API key'
       );
+    });
+
+    it('throws with a truncated message for non-JSON error bodies', async () => {
+      const transport = makeTransport(502, '<html>Bad Gateway</html>');
+      await expect(
+        sendChatCompletion({
+          configuration,
+          messages: [{ role: 'user', content: 'hi' }],
+          transport,
+        })
+      ).rejects.toThrow('Chat Completions request failed (502)');
+    });
+
+    it('names the endpoint when the transport itself rejects', async () => {
+      const transport = jest.fn(async (request: any) => {
+        throw new Error('Network Error');
+      });
+      await expect(
+        sendChatCompletion({
+          configuration,
+          messages: [{ role: 'user', content: 'hi' }],
+          transport,
+        })
+      ).rejects.toThrow(
+        'Chat Completions request to https://api.example.com/v1/chat/completions failed: Network Error'
+      );
+    });
+
+    it('omits tools and tool_choice for an empty tools array', async () => {
+      const transport = makeTransport(200, {
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      });
+      await sendChatCompletion({
+        configuration,
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+        transport,
+      });
+      const request = transport.mock.calls[0][0];
+      expect(request.body.tools).toBeUndefined();
+      expect(request.body.tool_choice).toBeUndefined();
+    });
+
+    it('passes an empty messages array through to the server', async () => {
+      const transport = makeTransport(400, {
+        error: { message: 'messages is empty' },
+      });
+      await expect(
+        sendChatCompletion({
+          configuration,
+          messages: [],
+          transport,
+        })
+      ).rejects.toThrow('(400)');
+      const request = transport.mock.calls[0][0];
+      expect(request.body.messages).toEqual([]);
+    });
+
+    it('reports a null usage when the server sends none', async () => {
+      const transport = makeTransport(200, {
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      });
+      const result = await sendChatCompletion({
+        configuration,
+        messages: [{ role: 'user', content: 'hi' }],
+        transport,
+      });
+      expect(result.usage).toBeNull();
     });
 
     it('exposes the io.net defaults', () => {
