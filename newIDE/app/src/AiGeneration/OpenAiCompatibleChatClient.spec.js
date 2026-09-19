@@ -252,9 +252,17 @@ describe('OpenAiCompatibleChatClient', () => {
 
     it('reads FastAPI-style detail errors', () => {
       expect(extractErrorMessage({ detail: 'Not Found' })).toBe('Not Found');
-      expect(
-        extractErrorMessage({ detail: [{ msg: 'field required' }] })
-      ).toBe('field required');
+      expect(extractErrorMessage({ detail: [{ msg: 'field required' }] })).toBe(
+        'field required'
+      );
+    });
+
+    it('truncates long JSON error messages', () => {
+      const message = extractErrorMessage({
+        error: { message: 'x'.repeat(600) },
+      });
+      expect(message.length).toBe(501);
+      expect(message.endsWith('…')).toBe(true);
     });
 
     it('truncates long non-JSON bodies', () => {
@@ -334,7 +342,7 @@ describe('OpenAiCompatibleChatClient', () => {
       );
     });
 
-    it('throws with a truncated message for non-JSON error bodies', async () => {
+    it('throws with the server message for non-JSON error bodies', async () => {
       const transport = makeTransport(502, '<html>Bad Gateway</html>');
       await expect(
         sendChatCompletion({
@@ -343,6 +351,13 @@ describe('OpenAiCompatibleChatClient', () => {
           transport,
         })
       ).rejects.toThrow('Chat Completions request failed (502)');
+      await expect(
+        sendChatCompletion({
+          configuration,
+          messages: [{ role: 'user', content: 'hi' }],
+          transport,
+        })
+      ).rejects.toThrow('<html>Bad Gateway</html>');
     });
 
     it('names the endpoint when the transport itself rejects', async () => {

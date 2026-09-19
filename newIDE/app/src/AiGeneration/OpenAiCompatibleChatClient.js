@@ -93,6 +93,7 @@ export type ChatCompletionsTransport = (
 // Joins a base URL and a path, tolerating trailing slashes on the base and a
 // missing leading slash on the path:
 // joinUrl('https://x/api/v1', 'models') === 'https://x/api/v1/models'.
+// Query strings in the base URL are not supported.
 export const joinUrl = (baseUrl: string, path: string): string =>
   baseUrl.replace(/\/+$/, '') + (path.startsWith('/') ? path : `/${path}`);
 
@@ -189,26 +190,27 @@ export const chatCompletionResponseToContentItems = (
 
 const MAX_ERROR_BODY_LENGTH = 500;
 
+const truncateMessage = (message: string): string =>
+  message.length > MAX_ERROR_BODY_LENGTH
+    ? `${message.slice(0, MAX_ERROR_BODY_LENGTH)}…`
+    : message;
+
 export const extractErrorMessage = (data: ?Object | string): string => {
   if (!data) return '';
-  if (typeof data === 'string') {
-    return data.length > MAX_ERROR_BODY_LENGTH
-      ? `${data.slice(0, MAX_ERROR_BODY_LENGTH)}…`
-      : data;
-  }
-  if (typeof data.error === 'string') return data.error;
-  if (data.error && typeof data.error.message === 'string') {
-    return data.error.message;
-  }
-  if (typeof data.message === 'string') return data.message;
+  if (typeof data === 'string') return truncateMessage(data);
+  let message = '';
+  if (typeof data.error === 'string') message = data.error;
+  else if (data.error && typeof data.error.message === 'string') {
+    message = data.error.message;
+  } else if (typeof data.message === 'string') message = data.message;
   // FastAPI-style errors (io.net and vLLM stacks): {detail: "..."} or
   // {detail: [{msg: "..."}]}.
-  if (typeof data.detail === 'string') return data.detail;
-  if (Array.isArray(data.detail)) {
+  else if (typeof data.detail === 'string') message = data.detail;
+  else if (Array.isArray(data.detail)) {
     const first = data.detail[0];
-    if (first && typeof first.msg === 'string') return first.msg;
+    if (first && typeof first.msg === 'string') message = first.msg;
   }
-  return '';
+  return truncateMessage(message);
 };
 
 // Default transport: axios, resolving for every status so that the status
